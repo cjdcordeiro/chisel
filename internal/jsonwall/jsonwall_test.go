@@ -15,6 +15,7 @@ type DataType struct {
 	D string `json:"d,omitempty"`
 }
 
+// something
 type dataTypeGet struct {
 	get      any
 	result   any
