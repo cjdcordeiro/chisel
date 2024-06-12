@@ -114,7 +114,9 @@ jobs:
           installTics: true
 
       - id: get-summary
-        run: echo "summary=${GITHUB_STEP_SUMMARY}" >> $GITHUB_OUTPUT
+        run: |
+          cat $GITHUB_STEP_SUMMARY | tee summary
+          echo "summary=summary" >> $GITHUB_OUTPUT
 
       - name: Post messages to PR
         uses: mshick/add-pr-comment@v2
