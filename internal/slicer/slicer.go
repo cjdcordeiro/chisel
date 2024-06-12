@@ -18,6 +18,7 @@ import (
 	"github.com/canonical/chisel/internal/setup"
 )
 
+// something
 type RunOptions struct {
 	Selection *setup.Selection
 	Archives  map[string]archive.Archive

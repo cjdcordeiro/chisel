@@ -40,6 +40,7 @@
 //	}
 package jsonwall
 
+//something
 import (
 	"bytes"
 	"encoding/json"

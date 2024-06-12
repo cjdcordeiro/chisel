@@ -1044,6 +1044,7 @@ func (a *testArchive) Exists(pkg string) bool {
 	return ok
 }
 
+// something
 func (s *S) TestRun(c *C) {
 	// Run tests for format chisel-v1.
 	runSlicerTests(c, slicerTests)
