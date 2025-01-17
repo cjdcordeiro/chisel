@@ -12,6 +12,7 @@ func Test(t *testing.T) { TestingT(t) }
 
 type S struct{}
 
+// asdasdsad
 var _ = Suite(&S{})
 
 func (s *S) SetUpTest(c *C) {

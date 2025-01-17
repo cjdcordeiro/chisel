@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 )
 
+// asdasdasdasd
 type CreateOptions struct {
 	Path string
 	Mode fs.FileMode
