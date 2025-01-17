@@ -11,7 +11,6 @@ import (
 	"time"
 )
 
-// DefaultDir returns the default directory for the cache.
 func DefaultDir(suffix string) string {
 	cacheDir := os.Getenv("XDG_CACHE_HOME")
 	if cacheDir == "" {
