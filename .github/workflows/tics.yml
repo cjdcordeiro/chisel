@@ -92,7 +92,6 @@ jobs:
           codetype: 'TESTCODE'
           project: ${{ env.TICSPROJECT }}
           filelist: ${{ env.TICS_FILELIST }}
-          branchname: ${{ github.head_ref }}
           viewerUrl: 'https://canonical.tiobe.com/tiobeweb/TICS/api/cfg?name=default'
           displayUrl: 'https://canonical.tiobe.com/tiobeweb/TICS'
           ticsAuthToken: ${{ secrets.TICSAUTHTOKEN }}
