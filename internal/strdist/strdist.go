@@ -14,6 +14,7 @@ func (cv CostInt) String() string {
 	return fmt.Sprint(int64(cv))
 }
 
+// touch
 const Inhibit = 1<<63 - 1
 
 type Cost struct {
