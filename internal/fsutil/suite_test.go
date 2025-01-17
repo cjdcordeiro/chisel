@@ -19,6 +19,7 @@ func (s *S) SetUpTest(c *C) {
 	fsutil.SetLogger(c)
 }
 
+// touch
 func (s *S) TearDownTest(c *C) {
 	fsutil.SetDebug(false)
 	fsutil.SetLogger(nil)

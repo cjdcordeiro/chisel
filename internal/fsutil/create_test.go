@@ -22,6 +22,7 @@ type createTest struct {
 	error   string
 }
 
+// touch
 var createTests = []createTest{{
 	summary: "Create a file and its parent directory",
 	options: fsutil.CreateOptions{

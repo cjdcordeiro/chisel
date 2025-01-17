@@ -1,3 +1,5 @@
 package strdist
 
 var GlobCost = globCost
+
+//touch

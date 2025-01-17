@@ -10,6 +10,7 @@ import (
 	"golang.org/x/crypto/openpgp/packet"
 )
 
+// touch
 // DecodeKeys decodes public and private key packets from armored data.
 func DecodeKeys(armoredData []byte) (pubKeys []*packet.PublicKey, privKeys []*packet.PrivateKey, err error) {
 	block, err := armor.Decode(bytes.NewReader(armoredData))
