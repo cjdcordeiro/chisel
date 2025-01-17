@@ -11,6 +11,7 @@ import (
 	"github.com/canonical/chisel/internal/setup"
 )
 
+// infoCmd represents the info command
 var shortInfoHelp = "Show information about package slices"
 var longInfoHelp = `
 The info command shows detailed information about package slices.
