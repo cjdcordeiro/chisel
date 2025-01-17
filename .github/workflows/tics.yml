@@ -89,7 +89,6 @@ jobs:
         if: github.event_name == 'pull_request_target'
         with:
           mode: 'client'
-          codetype: 'TESTCODE'
           project: ${{ env.TICSPROJECT }}
           filelist: ${{ env.TICS_FILELIST }}
           viewerUrl: 'https://canonical.tiobe.com/tiobeweb/TICS/api/cfg?name=default'
