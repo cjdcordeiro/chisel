@@ -10,6 +10,7 @@ import (
 	"golang.org/x/crypto/openpgp/packet"
 	"gopkg.in/yaml.v3"
 
+	"github.com/canonical/chisel/internal/apacheutil"
 	"github.com/canonical/chisel/internal/archive"
 	"github.com/canonical/chisel/internal/deb"
 	"github.com/canonical/chisel/internal/pgputil"
@@ -64,6 +65,7 @@ type yamlPath struct {
 	Until    PathUntil    `yaml:"until,omitempty"`
 	Arch     yamlArch     `yaml:"arch,omitempty"`
 	Generate GenerateKind `yaml:"generate,omitempty"`
+	Prefer   string       `yaml:"prefer,omitempty"`
 }
 
 func (yp *yamlPath) MarshalYAML() (interface{}, error) {
@@ -163,9 +165,13 @@ func parseRelease(baseDir, filePath string, data []byte) (*Release, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: cannot parse release definition: %v", fileName, err)
 	}
-	if yamlVar.Format != "v1" {
+	if yamlVar.Format != "v1" && yamlVar.Format != "v2" {
 		return nil, fmt.Errorf("%s: unknown format %q", fileName, yamlVar.Format)
 	}
+	if yamlVar.Format != "v1" && len(yamlVar.V2Archives) > 0 {
+		return nil, fmt.Errorf("%s: v2-archives is deprecated since format v2", fileName)
+	}
+
 	if len(yamlVar.Archives)+len(yamlVar.V2Archives) == 0 {
 		return nil, fmt.Errorf("%s: no archives defined", fileName)
 	}
@@ -201,6 +207,9 @@ func parseRelease(baseDir, filePath string, data []byte) (*Release, error) {
 	var defaultArchive string
 	var archiveNoPriority string
 	for archiveName, details := range yamlArchives {
+		if yamlVar.Format != "v1" && details.Default {
+			return nil, fmt.Errorf("%s: archive %q has 'default' field which is deprecated since format v2", fileName, archiveName)
+		}
 		if details.Version == "" {
 			return nil, fmt.Errorf("%s: archive %q missing version field", fileName, archiveName)
 		}
@@ -303,9 +312,9 @@ func parsePackage(baseDir, pkgName, pkgPath string, data []byte) (*Package, erro
 
 	zeroPath := yamlPath{}
 	for sliceName, yamlSlice := range yamlPkg.Slices {
-		match := snameExp.FindStringSubmatch(sliceName)
+		match := apacheutil.SnameExp.FindStringSubmatch(sliceName)
 		if match == nil {
-			return nil, fmt.Errorf("invalid slice name %q in %s", sliceName, pkgPath)
+			return nil, fmt.Errorf("invalid slice name %q in %s (start with a-z, len >= 3, only a-z / 0-9 / -)", sliceName, pkgPath)
 		}
 
 		slice := &Slice{
@@ -362,10 +371,11 @@ func parsePackage(baseDir, pkgName, pkgPath string, data []byte) (*Package, erro
 			var until PathUntil
 			var arch []string
 			var generate GenerateKind
+			var prefer string
 			if yamlPath != nil && yamlPath.Generate != "" {
 				zeroPathGenerate := zeroPath
 				zeroPathGenerate.Generate = yamlPath.Generate
-				if !yamlPath.SameContent(&zeroPathGenerate) || yamlPath.Until != UntilNone {
+				if !yamlPath.SameContent(&zeroPathGenerate) || yamlPath.Prefer != "" || yamlPath.Until != UntilNone {
 					return nil, fmt.Errorf("slice %s_%s path %s has invalid generate options",
 						pkgName, sliceName, contPath)
 				}
@@ -375,7 +385,7 @@ func parsePackage(baseDir, pkgName, pkgPath string, data []byte) (*Package, erro
 				kinds = append(kinds, GeneratePath)
 			} else if strings.ContainsAny(contPath, "*?") {
 				if yamlPath != nil {
-					if !yamlPath.SameContent(&zeroPath) {
+					if !yamlPath.SameContent(&zeroPath) || yamlPath.Prefer != "" {
 						return nil, fmt.Errorf("slice %s_%s path %s has invalid wildcard options",
 							pkgName, sliceName, contPath)
 					}
@@ -386,6 +396,7 @@ func parsePackage(baseDir, pkgName, pkgPath string, data []byte) (*Package, erro
 				mode = uint(yamlPath.Mode)
 				mutable = yamlPath.Mutable
 				generate = yamlPath.Generate
+				prefer = yamlPath.Prefer
 				if yamlPath.Dir {
 					if !strings.HasSuffix(contPath, "/") {
 						return nil, fmt.Errorf("slice %s_%s path %s must end in / for 'make' to be valid",
@@ -421,6 +432,9 @@ func parsePackage(baseDir, pkgName, pkgPath string, data []byte) (*Package, erro
 					}
 				}
 			}
+			if prefer == pkgName {
+				return nil, fmt.Errorf("slice %s_%s cannot 'prefer' its own package for path %s", pkgName, sliceName, contPath)
+			}
 			if len(kinds) == 0 {
 				kinds = append(kinds, CopyPath)
 			}
@@ -442,6 +456,7 @@ func parsePackage(baseDir, pkgName, pkgPath string, data []byte) (*Package, erro
 				Until:    until,
 				Arch:     arch,
 				Generate: generate,
+				Prefer:   prefer,
 			}
 		}
 
@@ -476,6 +491,7 @@ func pathInfoToYAML(pi *PathInfo) (*yamlPath, error) {
 		Until:    pi.Until,
 		Arch:     yamlArch{List: pi.Arch},
 		Generate: pi.Generate,
+		Prefer:   pi.Prefer,
 	}
 	switch pi.Kind {
 	case DirPath:
@@ -505,8 +521,6 @@ func sliceToYAML(s *Slice) (*yamlSlice, error) {
 		slice.Essential = append(slice.Essential, key.String())
 	}
 	for path, info := range s.Contents {
-		// TODO remove the following line after upgrading to Go 1.22 or higher.
-		info := info
 		yamlPath, err := pathInfoToYAML(&info)
 		if err != nil {
 			return nil, err

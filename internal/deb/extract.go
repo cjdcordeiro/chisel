@@ -87,7 +87,7 @@ func Extract(pkgReader io.ReadSeeker, options *ExtractOptions) (err error) {
 }
 
 func extractData(pkgReader io.ReadSeeker, options *ExtractOptions) error {
-	dataReader, err := getDataReader(pkgReader)
+	dataReader, err := DataReader(pkgReader)
 	if err != nil {
 		return err
 	}
@@ -213,7 +213,8 @@ func extractData(pkgReader io.ReadSeeker, options *ExtractOptions) error {
 				delete(tarDirMode, path)
 
 				createOptions := &fsutil.CreateOptions{
-					Path:        filepath.Join(options.TargetDir, path),
+					Root:        options.TargetDir,
+					Path:        path,
 					Mode:        mode,
 					MakeParents: true,
 				}
@@ -225,19 +226,13 @@ func extractData(pkgReader io.ReadSeeker, options *ExtractOptions) error {
 			link := tarHeader.Linkname
 			if tarHeader.Typeflag == tar.TypeLink {
 				// A hard link requires the real path of the target file.
-				// TODO This path must be sanitized to prevent a crafted
-				// tarball from referring to content outside the target
-				// directory. This issue also affects targetPath, but it's more
-				// relevant here as this is importing external content into the
-				// target directory. This is not a more serious issue because
-				// these tarballs are signed official packages, but must be
-				// fixed regardless.
 				link = filepath.Join(options.TargetDir, link)
 			}
 
 			// Create the entry itself.
 			createOptions := &fsutil.CreateOptions{
-				Path:         filepath.Join(options.TargetDir, targetPath),
+				Root:         options.TargetDir,
+				Path:         targetPath,
 				Mode:         tarHeader.FileInfo().Mode(),
 				Data:         pathReader,
 				Link:         link,
@@ -309,7 +304,7 @@ type extractHardLinkOptions struct {
 // extractHardLinks iterates through the tarball a second time to extract the
 // hard links that were not extracted in the first pass.
 func extractHardLinks(pkgReader io.ReadSeeker, opts *extractHardLinkOptions) error {
-	dataReader, err := getDataReader(pkgReader)
+	dataReader, err := DataReader(pkgReader)
 	if err != nil {
 		return err
 	}
@@ -342,7 +337,8 @@ func extractHardLinks(pkgReader io.ReadSeeker, opts *extractHardLinkOptions) err
 		absLink := filepath.Join(opts.TargetDir, links[0].path)
 		// Extract the content to the first hard link path.
 		createOptions := &fsutil.CreateOptions{
-			Path: absLink,
+			Root: opts.TargetDir,
+			Path: links[0].path,
 			Mode: tarHeader.FileInfo().Mode(),
 			Data: tarReader,
 		}
@@ -354,7 +350,8 @@ func extractHardLinks(pkgReader io.ReadSeeker, opts *extractHardLinkOptions) err
 		// Create the remaining hard links.
 		for _, link := range links[1:] {
 			createOptions := &fsutil.CreateOptions{
-				Path: filepath.Join(opts.TargetDir, link.path),
+				Root: opts.TargetDir,
+				Path: link.path,
 				Mode: tarHeader.FileInfo().Mode(),
 				// Link to the first file extracted for the hard links.
 				Link: absLink,
@@ -382,7 +379,9 @@ func extractHardLinks(pkgReader io.ReadSeeker, opts *extractHardLinkOptions) err
 	return nil
 }
 
-func getDataReader(pkgReader io.ReadSeeker) (io.ReadCloser, error) {
+// DataReader takes a Reader for the ar file belonging to a Debian package and
+// returns a Reader to the inner tarball.
+func DataReader(pkgReader io.ReadSeeker) (io.ReadCloser, error) {
 	arReader := ar.NewReader(pkgReader)
 	var dataReader io.ReadCloser
 	for dataReader == nil {

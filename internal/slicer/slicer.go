@@ -18,7 +18,7 @@ import (
 	"github.com/canonical/chisel/internal/archive"
 	"github.com/canonical/chisel/internal/deb"
 	"github.com/canonical/chisel/internal/fsutil"
-	"github.com/canonical/chisel/internal/manifest"
+	"github.com/canonical/chisel/internal/manifestutil"
 	"github.com/canonical/chisel/internal/scripts"
 	"github.com/canonical/chisel/internal/setup"
 )
@@ -95,6 +95,11 @@ func Run(options *RunOptions) error {
 		return err
 	}
 
+	prefers, err := options.Selection.Prefers()
+	if err != nil {
+		return err
+	}
+
 	// Build information to process the selection.
 	extract := make(map[string]map[string][]deb.ExtractInfo)
 	for _, slice := range options.Selection.Slices {
@@ -109,6 +114,9 @@ func Run(options *RunOptions) error {
 				continue
 			}
 			if len(pathInfo.Arch) > 0 && !slices.Contains(pathInfo.Arch, arch) {
+				continue
+			}
+			if preferredPkg, ok := prefers[targetPath]; ok && preferredPkg.Name != slice.Package {
 				continue
 			}
 
@@ -157,22 +165,22 @@ func Run(options *RunOptions) error {
 	// listed as until: mutate in all the slices that reference them.
 	knownPaths := map[string]pathData{}
 	addKnownPath(knownPaths, "/", pathData{})
-	report, err := manifest.NewReport(targetDir)
+	report, err := manifestutil.NewReport(targetDir)
 	if err != nil {
 		return fmt.Errorf("internal error: cannot create report: %w", err)
 	}
 
+	// Record directories which are created but where not listed in the slice
+	// contents.
+	notInSliceContents := map[string]fs.FileMode{}
+	// Record directories which may be an implicit conflict.
+	var implicitConflicts []string
 	// Creates the filesystem entry and adds it to the report. It also updates
 	// knownPaths with the files created.
 	create := func(extractInfos []deb.ExtractInfo, o *fsutil.CreateOptions) error {
 		entry, err := fsutil.Create(o)
 		if err != nil {
 			return err
-		}
-		// Content created was not listed in a slice contents because extractInfo
-		// is empty.
-		if len(extractInfos) == 0 {
-			return nil
 		}
 
 		relPath := filepath.Clean("/" + strings.TrimPrefix(o.Path, targetDir))
@@ -215,6 +223,11 @@ func Run(options *RunOptions) error {
 				hardLink: entry.Mode.IsRegular() && entry.Link != "",
 			}
 			addKnownPath(knownPaths, relPath, data)
+		} else {
+			if mode, ok := notInSliceContents[relPath]; ok && mode != o.Mode {
+				implicitConflicts = append(implicitConflicts, relPath)
+			}
+			notInSliceContents[relPath] = o.Mode
 		}
 		return nil
 	}
@@ -238,6 +251,17 @@ func Run(options *RunOptions) error {
 		}
 	}
 
+	for _, path := range implicitConflicts {
+		// A directory is listed in the report if and only if it was listed
+		// explictly in the slice contents, meaning there is no implicit
+		// conflict.
+		// Note: general conflicts are detected earlier as we forbid extracting
+		// content from multiple packages when paths match.
+		if _, ok := report.Entries[path]; !ok {
+			logf("Warning: Path %q has diverging modes in different packages. Please report.", path)
+		}
+	}
+
 	// Create new content not extracted from packages, e.g. TextPath or DirPath
 	// with {make: true}. The only exception is the manifest which will be created
 	// later.
@@ -252,6 +276,9 @@ func Run(options *RunOptions) error {
 			}
 			if pathInfo.Kind == setup.CopyPath || pathInfo.Kind == setup.GlobPath ||
 				pathInfo.Kind == setup.GeneratePath {
+				continue
+			}
+			if preferredPkg, ok := prefers[relPath]; ok && preferredPkg.Name != slice.Package {
 				continue
 			}
 			relPaths[relPath] = append(relPaths[relPath], slice)
@@ -276,8 +303,7 @@ func Run(options *RunOptions) error {
 			mutable: pathInfo.Mutable,
 		}
 		addKnownPath(knownPaths, relPath, data)
-		targetPath := filepath.Join(targetDir, relPath)
-		entry, err := createFile(targetPath, pathInfo)
+		entry, err := createFile(targetDir, relPath, pathInfo)
 		if err != nil {
 			return err
 		}
@@ -325,8 +351,8 @@ func Run(options *RunOptions) error {
 }
 
 func generateManifests(targetDir string, selection *setup.Selection,
-	report *manifest.Report, pkgInfos []*archive.PackageInfo) error {
-	manifestSlices := manifest.FindPaths(selection.Slices)
+	report *manifestutil.Report, pkgInfos []*archive.PackageInfo) error {
+	manifestSlices := manifestutil.FindPaths(selection.Slices)
 	if len(manifestSlices) == 0 {
 		// Nothing to do.
 		return nil
@@ -334,9 +360,9 @@ func generateManifests(targetDir string, selection *setup.Selection,
 	var writers []io.Writer
 	for relPath, slices := range manifestSlices {
 		logf("Generating manifest at %s...", relPath)
-		absPath := filepath.Join(targetDir, relPath)
 		createOptions := &fsutil.CreateOptions{
-			Path:        absPath,
+			Root:        targetDir,
+			Path:        relPath,
 			Mode:        manifestMode,
 			MakeParents: true,
 		}
@@ -358,12 +384,12 @@ func generateManifests(targetDir string, selection *setup.Selection,
 		return err
 	}
 	defer w.Close()
-	writeOptions := &manifest.WriteOptions{
+	writeOptions := &manifestutil.WriteOptions{
 		PackageInfo: pkgInfos,
 		Selection:   selection.Slices,
 		Report:      report,
 	}
-	err = manifest.Write(writeOptions, w)
+	err = manifestutil.Write(writeOptions, w)
 	return err
 }
 
@@ -426,7 +452,7 @@ func addKnownPath(knownPaths map[string]pathData, path string, data pathData) {
 	}
 }
 
-func createFile(targetPath string, pathInfo setup.PathInfo) (*fsutil.Entry, error) {
+func createFile(targetDir, relPath string, pathInfo setup.PathInfo) (*fsutil.Entry, error) {
 	targetMode := pathInfo.Mode
 	if targetMode == 0 {
 		if pathInfo.Kind == setup.DirPath {
@@ -454,7 +480,8 @@ func createFile(targetPath string, pathInfo setup.PathInfo) (*fsutil.Entry, erro
 	}
 
 	return fsutil.Create(&fsutil.CreateOptions{
-		Path:        targetPath,
+		Root:        targetDir,
+		Path:        relPath,
 		Mode:        tarHeader.FileInfo().Mode(),
 		Data:        fileContent,
 		Link:        linkTarget,

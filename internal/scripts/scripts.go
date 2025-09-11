@@ -7,15 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"go.starlark.net/resolve"
 	"go.starlark.net/starlark"
+	"go.starlark.net/syntax"
 
 	"github.com/canonical/chisel/internal/fsutil"
 )
-
-func init() {
-	resolve.AllowGlobalReassign = true
-}
 
 type Value = starlark.Value
 
@@ -27,7 +23,11 @@ type RunOptions struct {
 
 func Run(opts *RunOptions) error {
 	thread := &starlark.Thread{Name: opts.Label}
-	globals, err := starlark.ExecFile(thread, opts.Label, opts.Script, opts.Namespace)
+	fileOptions := &syntax.FileOptions{
+		TopLevelControl: true,
+		GlobalReassign:  true,
+	}
+	globals, err := starlark.ExecFileOptions(fileOptions, thread, opts.Label, opts.Script, opts.Namespace)
 	_ = globals
 	return err
 }
@@ -118,20 +118,14 @@ func (c *ContentValue) RealPath(path string, what Check) (string, error) {
 			return "", err
 		}
 	}
-	rpath := filepath.Join(c.RootDir, path)
-	if !filepath.IsAbs(rpath) || rpath != c.RootDir && !strings.HasPrefix(rpath, c.RootDir+string(filepath.Separator)) {
-		return "", fmt.Errorf("invalid content path: %s", path)
-	}
+	rpath := filepath.Join(c.RootDir, cpath)
 	if lname, err := os.Readlink(rpath); err == nil {
-		lpath := filepath.Join(filepath.Dir(rpath), lname)
+		lpath := filepath.Join(filepath.Dir(rpath), filepath.Clean(lname))
 		lrel, err := filepath.Rel(c.RootDir, lpath)
-		if err != nil || !filepath.IsAbs(lpath) || lpath != c.RootDir && !strings.HasPrefix(lpath, c.RootDir+string(filepath.Separator)) {
+		if err != nil || !filepath.IsAbs(lpath) {
 			return "", fmt.Errorf("invalid content symlink: %s", path)
 		}
-		_, err = c.RealPath("/"+lrel, what)
-		if err != nil {
-			return "", err
-		}
+		return c.RealPath("/"+lrel, what)
 	}
 	return rpath, nil
 }
@@ -178,6 +172,7 @@ func (c *ContentValue) Write(thread *starlark.Thread, fn *starlark.Builtin, args
 	// No mode parameter for now as slices are supposed to list files
 	// explicitly instead.
 	entry, err := fsutil.Create(&fsutil.CreateOptions{
+		Root: "/",
 		Path: fpath,
 		Data: bytes.NewReader(fdata),
 		Mode: 0644,

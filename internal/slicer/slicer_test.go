@@ -15,10 +15,11 @@ import (
 	. "gopkg.in/check.v1"
 
 	"github.com/canonical/chisel/internal/archive"
-	"github.com/canonical/chisel/internal/manifest"
+	"github.com/canonical/chisel/internal/manifestutil"
 	"github.com/canonical/chisel/internal/setup"
 	"github.com/canonical/chisel/internal/slicer"
 	"github.com/canonical/chisel/internal/testutil"
+	"github.com/canonical/chisel/public/manifest"
 )
 
 var (
@@ -35,6 +36,7 @@ type slicerTest struct {
 	filesystem    map[string]string
 	manifestPaths map[string]string
 	manifestPkgs  map[string]string
+	logOutput     string
 	error         string
 }
 
@@ -332,7 +334,7 @@ var slicerTests = []slicerTest{{
 	}, {
 		Name: "c-implicit-parent",
 		Data: testutil.MustMakeDeb([]testutil.TarEntry{
-			testutil.Dir(0755, "./dir/"),
+			testutil.Dir(0766, "./dir/"),
 			testutil.Reg(0644, "./dir/file-2", "random"),
 		}),
 	}},
@@ -369,6 +371,8 @@ var slicerTests = []slicerTest{{
 		"/dir/file-1": "file 0644 a441b15f {a-implicit-parent_myslice}",
 		"/dir/file-2": "file 0644 a441b15f {c-implicit-parent_myslice}",
 	},
+	// No Warning is emitted becaues the directory is explicitly listed.
+	logOutput: "",
 }, {
 	summary: "Valid same file in two slices in different packages",
 	slices: []setup.SliceKey{
@@ -1742,6 +1746,147 @@ var slicerTests = []slicerTest{{
 		"/file":     "file 0644 2c26b46b <1> {test-package_myslice}",
 		"/hardlink": "file 0644 2c26b46b <1> {test-package_myslice}",
 	},
+}, {
+	summary: "Hard links cannot escape the target directory",
+	slices:  []setup.SliceKey{{"test-package", "myslice"}},
+	pkgs: []*testutil.TestPackage{{
+		Name: "test-package",
+		Data: testutil.MustMakeDeb([]testutil.TarEntry{
+			testutil.Dir(0755, "./"),
+			testutil.Hrd(0644, "./hardlink", "/etc/group"),
+		}),
+	}},
+	release: map[string]string{
+		"slices/mydir/test-package.yaml": `
+			package: test-package
+			slices:
+				myslice:
+					contents:
+						/hardlink:
+		`,
+	},
+	error: `cannot extract from package "test-package": invalid link target /etc/group`,
+}, {
+	summary: "Cannot extract outside of target directory",
+	slices:  []setup.SliceKey{{"test-package", "myslice"}},
+	pkgs: []*testutil.TestPackage{{
+		Name: "test-package",
+		Data: testutil.MustMakeDeb([]testutil.TarEntry{
+			testutil.Dir(0755, "./"),
+			testutil.Reg(0644, "./../file", "hijacking system file"),
+		}),
+	}},
+	release: map[string]string{
+		"slices/mydir/test-package.yaml": `
+			package: test-package
+			slices:
+				myslice:
+					contents:
+						/**:
+		`,
+	},
+	error: `cannot extract from package "test-package": cannot create path /[a-z0-9\-\/]*/file outside of root /[a-z0-9\-\/]*`,
+}, {
+	summary: "Extract conflicting paths with prefer from proper package",
+	slices: []setup.SliceKey{
+		{"test-package1", "myslice"},
+		{"test-package2", "myslice"},
+	},
+	pkgs: []*testutil.TestPackage{{
+		Name: "test-package1",
+		Data: testutil.MustMakeDeb([]testutil.TarEntry{
+			testutil.Dir(0755, "./"),
+			testutil.Reg(0644, "./file", "foo"),
+		}),
+	}, {
+		Name: "test-package2",
+		Data: testutil.MustMakeDeb([]testutil.TarEntry{
+			testutil.Dir(0755, "./"),
+			testutil.Reg(0644, "./file", "bar"),
+		}),
+	}, {
+		Name: "test-package3",
+		Data: testutil.MustMakeDeb([]testutil.TarEntry{
+			testutil.Dir(0755, "./"),
+		}),
+	}},
+	release: map[string]string{
+		"slices/mydir/test-package1.yaml": `
+			package: test-package1
+			slices:
+				myslice:
+					contents:
+						/file: {prefer: test-package2}
+						/link: {symlink: /file1}
+						/text: {text: foo, prefer: test-package3}
+		`,
+		"slices/mydir/test-package2.yaml": `
+			package: test-package2
+			slices:
+				myslice:
+					contents:
+						/file:
+						/link: {symlink: /file2, prefer: test-package3}
+		`,
+		"slices/mydir/test-package3.yaml": `
+			package: test-package3
+			slices:
+				myslice:
+					contents:
+						/link: {symlink: /file2, prefer: test-package1}
+						/text: {text: bar}
+		`,
+	},
+	filesystem: map[string]string{
+		"/file": "file 0644 fcde2b2e",
+		"/link": "symlink /file1",
+		"/text": "file 0644 2c26b46b",
+	},
+	manifestPaths: map[string]string{
+		"/file": "file 0644 fcde2b2e {test-package2_myslice}",
+		"/link": "symlink /file1 {test-package1_myslice}",
+		"/text": "file 0644 2c26b46b {test-package1_myslice}",
+	},
+}, {
+	summary: "Warning when implicit parent directories conflict",
+	slices: []setup.SliceKey{
+		{"test-package1", "myslice"},
+		{"test-package2", "myslice"},
+	},
+	pkgs: []*testutil.TestPackage{{
+		Name: "test-package1",
+		Data: testutil.MustMakeDeb([]testutil.TarEntry{
+			testutil.Dir(0755, "./"),
+			// Note that both implicit parents have different permissions.
+			testutil.Dir(0766, "./parent/"),
+			testutil.Reg(0644, "./parent/foo", "whatever"),
+		}),
+	}, {
+		Name: "test-package2",
+		Data: testutil.MustMakeDeb([]testutil.TarEntry{
+			testutil.Dir(0755, "./"),
+			// And here.
+			testutil.Dir(0755, "./parent/"),
+			testutil.Reg(0644, "./parent/bar", "whatever"),
+		}),
+	}},
+	release: map[string]string{
+		"slices/mydir/test-package1.yaml": `
+			package: test-package1
+			slices:
+				myslice:
+					contents:
+						/parent/foo:
+		`,
+		"slices/mydir/test-package2.yaml": `
+			package: test-package2
+			slices:
+				myslice:
+					contents:
+						/parent/bar:
+		`,
+	},
+	logOutput: `(?s).*Warning: Path "/parent/" has diverging modes in different packages\. Please report\..*`,
 }}
 
 var defaultChiselYaml = `
@@ -1760,7 +1905,7 @@ var defaultChiselYaml = `
 
 func (s *S) TestRun(c *C) {
 	// Run tests for "archives" field in "v1" format.
-	runSlicerTests(c, slicerTests)
+	runSlicerTests(s, c, slicerTests)
 
 	// Run tests for "v2-archives" field in "v1" format.
 	v2ArchiveTests := make([]slicerTest, 0, len(slicerTests))
@@ -1775,12 +1920,31 @@ func (s *S) TestRun(c *C) {
 		t.release = m
 		v2ArchiveTests = append(v2ArchiveTests, t)
 	}
-	runSlicerTests(c, v2ArchiveTests)
+	runSlicerTests(s, c, v2ArchiveTests)
+
+	// Run tests for "v2" format.
+	v2FormatTests := make([]slicerTest, 0, len(slicerTests))
+	for _, t := range slicerTests {
+		m := make(map[string]string)
+		for k, v := range t.release {
+			if strings.Contains(v, "format: v1") &&
+				!strings.Contains(v, "v2-archives:") &&
+				!strings.Contains(v, "default: true") {
+				v = strings.Replace(v, "format: v1", "format: v2", -1)
+			}
+			m[k] = v
+		}
+		t.release = m
+		v2FormatTests = append(v2FormatTests, t)
+	}
+	runSlicerTests(s, c, v2FormatTests)
 }
 
-func runSlicerTests(c *C, tests []slicerTest) {
+func runSlicerTests(s *S, c *C, tests []slicerTest) {
 	for _, test := range tests {
 		for _, testSlices := range testutil.Permutations(test.slices) {
+			const logMarker = "---log-marker---"
+			c.Logf(logMarker)
 			c.Logf("Summary: %s", test.summary)
 
 			if _, ok := test.release["chisel.yaml"]; !ok {
@@ -1877,7 +2041,7 @@ func runSlicerTests(c *C, tests []slicerTest) {
 			}
 			c.Assert(err, IsNil)
 
-			if test.filesystem == nil && test.manifestPaths == nil && test.manifestPkgs == nil {
+			if test.filesystem == nil && test.manifestPaths == nil && test.manifestPkgs == nil && test.logOutput == "" {
 				continue
 			}
 			mfest := readManifest(c, options.TargetDir, manifestPath)
@@ -1906,6 +2070,19 @@ func runSlicerTests(c *C, tests []slicerTest) {
 				pkgsDump, err := dumpManifestPkgs(mfest)
 				c.Assert(err, IsNil)
 				c.Assert(pkgsDump, DeepEquals, test.manifestPkgs)
+			}
+
+			// Find the log output of this test by trimming the suite output
+			// until we find the last occurrence of the summary.
+			testLogs := strings.Split(c.GetTestLog(), logMarker)
+			logOutput := testLogs[len(testLogs)-1]
+
+			// Assert log output.
+			if test.logOutput != "" {
+				c.Assert(logOutput, Matches, test.logOutput)
+			} else {
+				// No warnings emitted.
+				c.Assert(logOutput, Not(Matches), "(?s).*Warning.*")
 			}
 		}
 	}
@@ -1971,7 +2148,7 @@ func readManifest(c *C, targetDir, manifestPath string) *manifest.Manifest {
 	defer r.Close()
 	mfest, err := manifest.Read(r)
 	c.Assert(err, IsNil)
-	err = manifest.Validate(mfest)
+	err = manifestutil.Validate(mfest)
 	c.Assert(err, IsNil)
 
 	// Assert that the mode of the manifest.wall file matches the one recorded
