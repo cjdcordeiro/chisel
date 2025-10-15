@@ -25,6 +25,16 @@ jobs:
       - name: Run unit tests
         run: go test -v -cover -coverprofile=${TEST_COVERAGE_FILE} ./...
 
+      - run: |
+          tail -n +2 ${TEST_COVERAGE_FILE} | while read line; do
+            if [[ "$(echo "${line##* }")" == "0" ]]; then
+              file_name=$(echo -n "${line}" | cut -d: -f1)
+              line_number=$(echo -n "${line}" | cut -d: -f2 | cut -d. -f1)
+              column_number=$(echo -n "${line}" | cut -d. -f2 | cut -d, -f1)
+              echo "::warning file=$file_name,line=$line_number,col=$column_number::Not tested"
+            fi
+          done
+
       - name: Convert test coverage to HTML
         if: always()
         continue-on-error: true
