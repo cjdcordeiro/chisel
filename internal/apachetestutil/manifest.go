@@ -21,7 +21,7 @@ func DumpManifestContents(c *check.C, mfest *manifest.Manifest) *ManifestContent
 		slices = append(slices, slice)
 		return nil
 	})
-	c.Assert(err, check.IsNil)
+	c.Assert(err, check.IsNil) // testme
 
 	var pkgs []*manifest.Package
 	err = mfest.IteratePackages(func(pkg *manifest.Package) error {
