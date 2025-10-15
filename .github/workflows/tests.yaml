@@ -28,10 +28,9 @@ jobs:
       - run: |
           tail -n +2 ${TEST_COVERAGE_FILE} | while read line; do
             if [[ "$(echo "${line##* }")" == "0" ]]; then
-              file_name=$(echo -n "${line}" | cut -d: -f1)
+              file_name=$(echo -n "${line}" | cut -d: -f1 | sed 's|github.com/canonical/chisel/||g')
               line_number=$(echo -n "${line}" | cut -d: -f2 | cut -d. -f1)
-              column_number=$(echo -n "${line}" | cut -d. -f2 | cut -d, -f1)
-              echo "::warning file=$file_name,line=$line_number,col=$column_number::Not tested"
+              echo "::warning file=$file_name,line=$line_number::Not tested"
             fi
           done
 
