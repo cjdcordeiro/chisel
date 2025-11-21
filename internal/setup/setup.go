@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/openpgp/packet"
 
@@ -16,9 +18,17 @@ import (
 // Release is a collection of package slices targeting a particular
 // distribution version.
 type Release struct {
-	Path     string
-	Packages map[string]*Package
-	Archives map[string]*Archive
+	Path        string
+	Packages    map[string]*Package
+	Archives    map[string]*Archive
+	Maintenance *Maintenance
+}
+
+type Maintenance struct {
+	Standard  time.Time
+	Expanded  time.Time
+	Legacy    time.Time
+	EndOfLife time.Time
 }
 
 // Archive is the location from which binary packages are obtained.
@@ -30,6 +40,11 @@ type Archive struct {
 	Priority   int
 	Pro        string
 	PubKeys    []*packet.PublicKey
+	// Maintained is set when the archive is still being updated.
+	Maintained bool
+	// OldRelease is set for Ubuntu releases which are moved from the regular
+	// archive which happens after the release's end of life date.
+	OldRelease bool
 }
 
 // Package holds a collection of slices that represent parts of themselves.
@@ -44,9 +59,13 @@ type Package struct {
 type Slice struct {
 	Package   string
 	Name      string
-	Essential []SliceKey
+	Essential map[SliceKey]EssentialInfo
 	Contents  map[string]PathInfo
 	Scripts   SliceScripts
+}
+
+type EssentialInfo struct {
+	Arch []string
 }
 
 type SliceScripts struct {
@@ -122,7 +141,7 @@ type Selection struct {
 	Slices  []*Slice
 }
 
-// Perfers uses the prefer relationships and returns a map from each path to
+// Prefers uses the prefer relationships and returns a map from each path to
 // the package where it should be extracted from. If there is no relationship
 // for a given path then it will not be present on the map.
 func (s *Selection) Prefers() (map[string]*Package, error) {
@@ -283,7 +302,12 @@ func (r *Release) validate() error {
 	}
 
 	// Check for cycles.
-	_, err = order(r.Packages, keys)
+	// Note: For release validation an essential with a specific arch is the
+	// same as an essential with all archs, i.e. Chisel does not use arch to
+	// partition the dependency set. If we were to use arch, we would allow
+	// combinations of dependencies which are overly complex and brittle, that
+	// is why it is better to be more strict here.
+	_, err = order(r.Packages, keys, "")
 	if err != nil {
 		return err
 	}
@@ -313,7 +337,12 @@ func (r *Release) validate() error {
 	return nil
 }
 
-func order(pkgs map[string]*Package, keys []SliceKey) ([]SliceKey, error) {
+// order will use TarjanSort to get an ordering of the essential(s). It will
+// return an error if there are cycles.
+//
+// If arch is supplied, essential(s) not specific to that arch are not
+// considered.
+func order(pkgs map[string]*Package, keys []SliceKey, arch string) ([]SliceKey, error) {
 
 	// Preprocess the list to improve error messages.
 	for _, key := range keys {
@@ -326,7 +355,7 @@ func order(pkgs map[string]*Package, keys []SliceKey) ([]SliceKey, error) {
 
 	// Collect all relevant package slices.
 	successors := map[string][]string{}
-	pending := append([]SliceKey(nil), keys...)
+	pending := slices.Clone(keys)
 
 	seen := make(map[SliceKey]bool)
 	for i := 0; i < len(pending); i++ {
@@ -339,15 +368,18 @@ func order(pkgs map[string]*Package, keys []SliceKey) ([]SliceKey, error) {
 		slice := pkg.Slices[key.Slice]
 		fqslice := slice.String()
 		predecessors := successors[fqslice]
-		for _, req := range slice.Essential {
+		for req, info := range slice.Essential {
+			if len(info.Arch) > 0 && !slices.Contains(info.Arch, arch) {
+				continue
+			}
 			fqreq := req.String()
 			if reqpkg, ok := pkgs[req.Package]; !ok || reqpkg.Slices[req.Slice] == nil {
 				return nil, fmt.Errorf("%s requires %s, but slice is missing", fqslice, fqreq)
 			}
 			predecessors = append(predecessors, fqreq)
+			pending = append(pending, req)
 		}
 		successors[fqslice] = predecessors
-		pending = append(pending, slice.Essential...)
 	}
 
 	// Sort them up.
@@ -430,14 +462,14 @@ func stripBase(baseDir, path string) string {
 	return strings.TrimPrefix(path, baseDir+string(filepath.Separator))
 }
 
-func Select(release *Release, slices []SliceKey) (*Selection, error) {
+func Select(release *Release, slices []SliceKey, arch string) (*Selection, error) {
 	logf("Selecting slices...")
 
 	selection := &Selection{
 		Release: release,
 	}
 
-	sorted, err := order(release.Packages, slices)
+	sorted, err := order(release.Packages, slices, arch)
 	if err != nil {
 		return nil, err
 	}
@@ -553,7 +585,7 @@ func findPrefer(path, pkg, prefer string, prefers map[preferKey]string) (found b
 	// always the case unless the release is broken. Note that
 	// the pkg reported in the error is the one inside the loop,
 	// not necessarily the input parameter.
-	for i := 0; i < len(prefers); i++ {
+	for range len(prefers) {
 		pkg = prefers[preferKey{preferTarget, path, pkg}]
 		if pkg == "" {
 			return false, nil

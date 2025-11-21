@@ -52,9 +52,9 @@ var infoTests = []infoTest{{
 				contents:
 					/dir/file: {}
 			myslice2:
-				essential:
-					- mypkg1_myslice1
-					- mypkg2_myslice
+				v3-essential:
+					mypkg1_myslice1: {}
+					mypkg2_myslice: {arch: amd64}
 	`,
 }, {
 	summary: "Packages and slices",
@@ -67,9 +67,9 @@ var infoTests = []infoTest{{
 				contents:
 					/dir/file: {}
 			myslice2:
-				essential:
-					- mypkg1_myslice1
-					- mypkg2_myslice
+				v3-essential:
+					mypkg1_myslice1: {}
+					mypkg2_myslice: {arch: amd64}
 		---
 		package: mypkg2
 		slices:
@@ -88,9 +88,9 @@ var infoTests = []infoTest{{
 				contents:
 					/dir/file: {}
 			myslice2:
-				essential:
-					- mypkg1_myslice1
-					- mypkg2_myslice
+				v3-essential:
+					mypkg1_myslice1: {}
+					mypkg2_myslice: {arch: amd64}
 	`,
 }, {
 	summary: "Same slice appearing multiple times",
@@ -137,23 +137,8 @@ var infoTests = []infoTest{{
 	err:     `no slice definitions found for: "foo_bar_foo", "a_b", "7_c", "a_b c", "a_b x_y"`,
 }}
 
-var testKey = testutil.PGPKeys["key1"]
-
-var defaultChiselYaml = `
-	format: v1
-	archives:
-		ubuntu:
-			version: 22.04
-			components: [main, universe]
-			suites: [jammy]
-			public-keys: [test-key]
-	public-keys:
-		test-key:
-			id: ` + testKey.ID + `
-			armor: |` + "\n" + testutil.PrefixEachLine(testKey.PubKeyArmor, "\t\t\t\t\t\t")
-
 var infoRelease = map[string]string{
-	"chisel.yaml": string(defaultChiselYaml),
+	"chisel.yaml": string(testutil.DefaultChiselYaml),
 	"slices/mypkg1.yaml": `
 		package: mypkg1
 		essential:
@@ -163,8 +148,8 @@ var infoRelease = map[string]string{
 				contents:
 					/dir/file:
 			myslice2:
-				essential:
-					- mypkg2_myslice
+				v3-essential:
+					mypkg2_myslice: {arch: amd64}
 	`,
 	"slices/mypkg2.yaml": `
 		package: mypkg2

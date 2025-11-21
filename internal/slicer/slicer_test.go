@@ -371,7 +371,7 @@ var slicerTests = []slicerTest{{
 		"/dir/file-1": "file 0644 a441b15f {a-implicit-parent_myslice}",
 		"/dir/file-2": "file 0644 a441b15f {c-implicit-parent_myslice}",
 	},
-	// No Warning is emitted becaues the directory is explicitly listed.
+	// No Warning is emitted because the directory is explicitly listed.
 	logOutput: "",
 }, {
 	summary: "Valid same file in two slices in different packages",
@@ -812,6 +812,9 @@ var slicerTests = []slicerTest{{
 	release: map[string]string{
 		"chisel.yaml": `
 			format: v1
+			maintenance:
+				standard: 2025-01-01
+				end-of-life: 2100-01-01
 			archives:
 				foo:
 					version: 22.04
@@ -884,6 +887,9 @@ var slicerTests = []slicerTest{{
 	release: map[string]string{
 		"chisel.yaml": `
 			format: v1
+			maintenance:
+				standard: 2025-01-01
+				end-of-life: 2100-01-01
 			archives:
 				foo:
 					version: 22.04
@@ -937,6 +943,9 @@ var slicerTests = []slicerTest{{
 	release: map[string]string{
 		"chisel.yaml": `
 			format: v1
+			maintenance:
+				standard: 2025-01-01
+				end-of-life: 2100-01-01
 			archives:
 				foo:
 					version: 22.04
@@ -974,6 +983,9 @@ var slicerTests = []slicerTest{{
 	release: map[string]string{
 		"chisel.yaml": `
 			format: v1
+			maintenance:
+				standard: 2025-01-01
+				end-of-life: 2100-01-01
 			archives:
 				foo:
 					version: 22.04
@@ -1014,6 +1026,9 @@ var slicerTests = []slicerTest{{
 	release: map[string]string{
 		"chisel.yaml": `
 			format: v1
+			maintenance:
+				standard: 2025-01-01
+				end-of-life: 2100-01-01
 			archives:
 				foo:
 					version: 22.04
@@ -1051,6 +1066,9 @@ var slicerTests = []slicerTest{{
 	release: map[string]string{
 		"chisel.yaml": `
 			format: v1
+			maintenance:
+				standard: 2025-01-01
+				end-of-life: 2100-01-01
 			archives:
 				foo:
 					version: 22.04
@@ -1449,7 +1467,7 @@ var slicerTests = []slicerTest{{
 				break
 			}
 		}
-		opts.Selection.Slices = append(opts.Selection.Slices[:index], opts.Selection.Slices[index+1:]...)
+		opts.Selection.Slices = slices.Delete(opts.Selection.Slices, index, index+1)
 	},
 	release: map[string]string{
 		"slices/mydir/test-package.yaml": `
@@ -1465,6 +1483,9 @@ var slicerTests = []slicerTest{{
 	release: map[string]string{
 		"chisel.yaml": `
 			format: v1
+			maintenance:
+				standard: 2025-01-01
+				end-of-life: 2100-01-01
 			archives:
 				invalid:
 					version: 20.04
@@ -1887,21 +1908,77 @@ var slicerTests = []slicerTest{{
 		`,
 	},
 	logOutput: `(?s).*Warning: Path "/parent/" has diverging modes in different packages\. Please report\..*`,
+}, {
+	summary: "Arch specific slice is not installed when it does not match requested arch",
+	slices:  []setup.SliceKey{{"test-package", "myslice"}},
+	arch:    "amd64",
+	release: map[string]string{
+		"slices/mydir/test-package.yaml": `
+			package: test-package
+			slices:
+				myslice:
+					v3-essential:
+						test-package_not-installed: {arch: arm64}
+					contents:
+				not-installed:
+					contents:
+						/dir/file:
+		`,
+	},
+	filesystem:    map[string]string{},
+	manifestPaths: map[string]string{},
+}, {
+	summary: "Arch specific slice is installed when it matches requested arch",
+	slices:  []setup.SliceKey{{"test-package", "myslice"}},
+	arch:    "arm64",
+	release: map[string]string{
+		"slices/mydir/test-package.yaml": `
+			package: test-package
+			slices:
+				myslice:
+					v3-essential:
+						test-package_installed: {arch: arm64}
+					contents:
+				installed:
+					contents:
+						/dir/file:
+		`,
+	},
+	filesystem: map[string]string{
+		"/dir/":     "dir 0755",
+		"/dir/file": "file 0644 cc55e2ec",
+	},
+	manifestPaths: map[string]string{
+		"/dir/file": "file 0644 cc55e2ec {test-package_installed}",
+	},
+}, {
+	summary: "Transitive essential",
+	slices:  []setup.SliceKey{{"test-package", "first"}},
+	release: map[string]string{
+		"slices/mydir/test-package.yaml": `
+			package: test-package
+			slices:
+				first:
+					essential:
+						- test-package_second
+					contents:
+				second:
+					essential:
+						- test-package_third
+					contents:
+				third:
+					contents:
+						/dir/file:
+		`,
+	},
+	filesystem: map[string]string{
+		"/dir/":     "dir 0755",
+		"/dir/file": "file 0644 cc55e2ec",
+	},
+	manifestPaths: map[string]string{
+		"/dir/file": "file 0644 cc55e2ec {test-package_third}",
+	},
 }}
-
-var defaultChiselYaml = `
-	format: v1
-	archives:
-		ubuntu:
-			version: 22.04
-			components: [main, universe]
-			suites: [jammy]
-			public-keys: [test-key]
-	public-keys:
-		test-key:
-			id: ` + testKey.ID + `
-			armor: |` + "\n" + testutil.PrefixEachLine(testKey.PubKeyArmor, "\t\t\t\t\t\t") + `
-`
 
 func (s *S) TestRun(c *C) {
 	// Run tests for "archives" field in "v1" format.
@@ -1948,7 +2025,7 @@ func runSlicerTests(s *S, c *C, tests []slicerTest) {
 			c.Logf("Summary: %s", test.summary)
 
 			if _, ok := test.release["chisel.yaml"]; !ok {
-				test.release["chisel.yaml"] = defaultChiselYaml
+				test.release["chisel.yaml"] = testutil.DefaultChiselYaml
 			}
 			if test.pkgs == nil {
 				test.pkgs = []*testutil.TestPackage{{
@@ -2001,7 +2078,7 @@ func runSlicerTests(s *S, c *C, tests []slicerTest) {
 				Slice:   "manifest",
 			})
 
-			selection, err := setup.Select(release, testSlices)
+			selection, err := setup.Select(release, testSlices, test.arch)
 			c.Assert(err, IsNil)
 
 			archives := map[string]archive.Archive{}

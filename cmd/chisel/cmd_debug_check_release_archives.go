@@ -73,6 +73,8 @@ func (cmd *cmdDebugCheckReleaseArchives) Execute(args []string) error {
 			Pro:        archiveInfo.Pro,
 			CacheDir:   cache.DefaultDir("chisel"),
 			PubKeys:    archiveInfo.PubKeys,
+			Maintained: archiveInfo.Maintained,
+			OldRelease: archiveInfo.OldRelease,
 		})
 		if err == archive.ErrCredentialsNotFound {
 			logf("Archive %q ignored: credentials not found\n", archiveName)
@@ -220,7 +222,7 @@ func hasPathConflict(release *setup.Release, path string, observations []pathObs
 	for _, observation := range observations {
 		for _, pkgName := range observation.Packages {
 			for _, slice := range release.Packages[pkgName].Slices {
-				// Symlinks do not containg trailing slash but folders do,
+				// Symlinks do not contain trailing slash but folders do,
 				// check for both.
 				_, ok1 := slice.Contents[path]
 				_, ok2 := slice.Contents[path+"/"]

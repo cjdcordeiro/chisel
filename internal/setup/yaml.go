@@ -2,10 +2,12 @@ package setup
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"path"
 	"slices"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/openpgp/packet"
 	"gopkg.in/yaml.v3"
@@ -16,16 +18,17 @@ import (
 	"github.com/canonical/chisel/internal/pgputil"
 )
 
-func (p *Package) MarshalYAML() (interface{}, error) {
+func (p *Package) MarshalYAML() (any, error) {
 	return packageToYAML(p)
 }
 
 var _ yaml.Marshaler = (*Package)(nil)
 
 type yamlRelease struct {
-	Format   string                 `yaml:"format"`
-	Archives map[string]yamlArchive `yaml:"archives"`
-	PubKeys  map[string]yamlPubKey  `yaml:"public-keys"`
+	Format      string                 `yaml:"format"`
+	Maintenance yamlMaintenance        `yaml:"maintenance"`
+	Archives    map[string]yamlArchive `yaml:"archives"`
+	PubKeys     map[string]yamlPubKey  `yaml:"public-keys"`
 	// "v2-archives" is used for backwards compatibility with Chisel <= 1.0.0,
 	// where it will be ignored. In new versions, it will be parsed with the new
 	// fields that break said compatibility (e.g. "pro" archives) and merged
@@ -53,6 +56,10 @@ type yamlPackage struct {
 	Archive   string               `yaml:"archive,omitempty"`
 	Essential []string             `yaml:"essential,omitempty"`
 	Slices    map[string]yamlSlice `yaml:"slices,omitempty"`
+	// "v3-essential" is used for backwards porting of arch-specific essential
+	// to releases that use "v1" or "v2". When using older versions of Chisel
+	// the field will be ignored and `essential` is used as a fallback.
+	V3Essential map[string]*yamlEssential `yaml:"v3-essential,omitempty"`
 }
 
 type yamlPath struct {
@@ -68,7 +75,7 @@ type yamlPath struct {
 	Prefer   string       `yaml:"prefer,omitempty"`
 }
 
-func (yp *yamlPath) MarshalYAML() (interface{}, error) {
+func (yp *yamlPath) MarshalYAML() (any, error) {
 	type flowPath *yamlPath
 	node := &yaml.Node{}
 	err := node.Encode(flowPath(yp))
@@ -113,7 +120,7 @@ func (ya *yamlArch) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-func (ya yamlArch) MarshalYAML() (interface{}, error) {
+func (ya yamlArch) MarshalYAML() (any, error) {
 	if len(ya.List) == 1 {
 		return ya.List[0], nil
 	}
@@ -124,7 +131,7 @@ var _ yaml.Marshaler = yamlArch{}
 
 type yamlMode uint
 
-func (ym yamlMode) MarshalYAML() (interface{}, error) {
+func (ym yamlMode) MarshalYAML() (any, error) {
 	// Workaround for marshalling integers in octal format.
 	// Ref: https://github.com/go-yaml/yaml/issues/420.
 	node := &yaml.Node{}
@@ -142,12 +149,33 @@ type yamlSlice struct {
 	Essential []string             `yaml:"essential,omitempty"`
 	Contents  map[string]*yamlPath `yaml:"contents,omitempty"`
 	Mutate    string               `yaml:"mutate,omitempty"`
+	// "v3-essential" is used for backwards porting of arch-specific essential
+	// to releases that use "v1" or "v2". When using older versions of Chisel
+	// the field will be ignored and `essential` is used as a fallback.
+	V3Essential map[string]*yamlEssential `yaml:"v3-essential,omitempty"`
 }
 
 type yamlPubKey struct {
 	ID    string `yaml:"id"`
 	Armor string `yaml:"armor"`
 }
+
+type yamlEssential struct {
+	Arch yamlArch `yaml:"arch,omitempty"`
+}
+
+func (ye *yamlEssential) MarshalYAML() (any, error) {
+	type flowEssential *yamlEssential
+	node := &yaml.Node{}
+	err := node.Encode(flowEssential(ye))
+	if err != nil {
+		return nil, err
+	}
+	node.Style |= yaml.FlowStyle
+	return node, nil
+}
+
+var _ yaml.Marshaler = (*yamlEssential)(nil)
 
 func parseRelease(baseDir, filePath string, data []byte) (*Release, error) {
 	release := &Release{
@@ -219,12 +247,14 @@ func parseRelease(baseDir, filePath string, data []byte) (*Release, error) {
 		if len(details.Components) == 0 {
 			return nil, fmt.Errorf("%s: archive %q missing components field", fileName, archiveName)
 		}
+
 		switch details.Pro {
 		case "", archive.ProApps, archive.ProFIPS, archive.ProFIPSUpdates, archive.ProInfra:
 		default:
 			logf("Archive %q ignored: invalid pro value: %q", archiveName, details.Pro)
 			continue
 		}
+
 		if details.Default && defaultArchive != "" {
 			if archiveName < defaultArchive {
 				archiveName, defaultArchive = defaultArchive, archiveName
@@ -234,6 +264,7 @@ func parseRelease(baseDir, filePath string, data []byte) (*Release, error) {
 		if details.Default {
 			defaultArchive = archiveName
 		}
+
 		if len(details.PubKeys) == 0 {
 			return nil, fmt.Errorf("%s: archive %q missing public-keys field", fileName, archiveName)
 		}
@@ -245,6 +276,7 @@ func parseRelease(baseDir, filePath string, data []byte) (*Release, error) {
 			}
 			archiveKeys = append(archiveKeys, key)
 		}
+
 		priority := 0
 		if details.Priority != nil {
 			hasPriority = true
@@ -258,6 +290,7 @@ func parseRelease(baseDir, filePath string, data []byte) (*Release, error) {
 				archiveNoPriority = archiveName
 			}
 		}
+
 		release.Archives[archiveName] = &Archive{
 			Name:       archiveName,
 			Version:    details.Version,
@@ -288,6 +321,55 @@ func parseRelease(baseDir, filePath string, data []byte) (*Release, error) {
 		release.Archives[defaultArchive].Priority = 1
 	}
 
+	var maintenance Maintenance
+	if yamlVar.Maintenance == (yamlMaintenance{}) {
+		// Use default if key not present in yaml, best effort if "ubuntu"
+		// archive is present.
+		// TODO remove the defaults some time after chisel-releases is updated.
+		ubuntuArchive, ok := release.Archives["ubuntu"]
+		if ok {
+			maintenance = defaultMaintenance[ubuntuArchive.Version]
+		}
+	}
+	if maintenance == (Maintenance{}) {
+		maintenance, err = parseYamlMaintenance(&yamlVar.Maintenance)
+		if err != nil {
+			return nil, fmt.Errorf("%s: cannot parse maintenance: %s", fileName, err)
+		}
+	}
+	release.Maintenance = &maintenance
+	for archiveName, details := range release.Archives {
+		oldRelease := false
+		maintained := true
+		switch details.Pro {
+		case "":
+			// The standard archive is no longer maintained during Expanded
+			// Security Maintenance for LTS, or after End of Life for interim
+			// releases.
+			if release.Maintenance.Expanded != (time.Time{}) {
+				maintained = time.Now().Before(release.Maintenance.Expanded)
+			} else {
+				maintained = time.Now().Before(release.Maintenance.EndOfLife)
+			}
+			oldRelease = time.Now().After(release.Maintenance.EndOfLife)
+		case archive.ProInfra, archive.ProApps:
+			// Legacy support requires a different subscription and a different
+			// archive.
+			if release.Maintenance.Legacy != (time.Time{}) {
+				maintained = time.Now().Before(release.Maintenance.Legacy)
+			} else {
+				maintained = time.Now().Before(release.Maintenance.EndOfLife)
+			}
+		default:
+			// FIPS archives are not included in the support window, they need
+			// a different subscription and have a different lifetime.
+			maintained = time.Now().Before(release.Maintenance.EndOfLife)
+		}
+		details.Maintained = maintained
+		details.OldRelease = oldRelease
+		release.Archives[archiveName] = details
+	}
+
 	return release, err
 }
 
@@ -308,15 +390,25 @@ func parsePackage(baseDir, pkgName, pkgPath string, data []byte) (*Package, erro
 	if yamlPkg.Name != pkg.Name {
 		return nil, fmt.Errorf("%s: filename and 'package' field (%q) disagree", pkgPath, yamlPkg.Name)
 	}
-	pkg.Archive = yamlPkg.Archive
+	if yamlPkg.V3Essential == nil {
+		yamlPkg.V3Essential = map[string]*yamlEssential{}
+	}
+	for _, refName := range yamlPkg.Essential {
+		if _, ok := yamlPkg.V3Essential[refName]; ok {
+			// This check is only needed because the list format can contain
+			// duplicates. It should be removed when format "v2" is deprecated.
+			return nil, fmt.Errorf("package %q repeats %s in essential fields", pkgName, refName)
+		}
+		yamlPkg.V3Essential[refName] = &yamlEssential{}
+	}
 
+	pkg.Archive = yamlPkg.Archive
 	zeroPath := yamlPath{}
 	for sliceName, yamlSlice := range yamlPkg.Slices {
 		match := apacheutil.SnameExp.FindStringSubmatch(sliceName)
 		if match == nil {
 			return nil, fmt.Errorf("invalid slice name %q in %s (start with a-z, len >= 3, only a-z / 0-9 / -)", sliceName, pkgPath)
 		}
-
 		slice := &Slice{
 			Package: pkgName,
 			Name:    sliceName,
@@ -324,7 +416,19 @@ func parsePackage(baseDir, pkgName, pkgPath string, data []byte) (*Package, erro
 				Mutate: yamlSlice.Mutate,
 			},
 		}
-		for _, refName := range yamlPkg.Essential {
+
+		if yamlSlice.V3Essential == nil {
+			yamlSlice.V3Essential = map[string]*yamlEssential{}
+		}
+		for _, refName := range yamlSlice.Essential {
+			if _, ok := yamlSlice.V3Essential[refName]; ok {
+				// This check is only needed because the list format can contain
+				// duplicates. It should be removed when format "v2" is deprecated.
+				return nil, fmt.Errorf("slice %s repeats %s in essential fields", slice, refName)
+			}
+			yamlSlice.V3Essential[refName] = &yamlEssential{}
+		}
+		for refName, essentialInfo := range yamlPkg.V3Essential {
 			sliceKey, err := ParseSliceKey(refName)
 			if err != nil {
 				return nil, fmt.Errorf("package %q has invalid essential slice reference: %q", pkgName, refName)
@@ -333,12 +437,19 @@ func parsePackage(baseDir, pkgName, pkgPath string, data []byte) (*Package, erro
 				// Do not add the slice to its own essentials list.
 				continue
 			}
-			if slices.Contains(slice.Essential, sliceKey) {
-				return nil, fmt.Errorf("package %s defined with redundant essential slice: %s", pkgName, refName)
+			if _, ok := slice.Essential[sliceKey]; ok {
+				return nil, fmt.Errorf("package %q repeats %s in essential fields", pkgName, refName)
 			}
-			slice.Essential = append(slice.Essential, sliceKey)
+			if slice.Essential == nil {
+				slice.Essential = map[SliceKey]EssentialInfo{}
+			}
+			var archList []string
+			if essentialInfo != nil {
+				archList = essentialInfo.Arch.List
+			}
+			slice.Essential[sliceKey] = EssentialInfo{Arch: archList}
 		}
-		for _, refName := range yamlSlice.Essential {
+		for refName, essentialInfo := range yamlSlice.V3Essential {
 			sliceKey, err := ParseSliceKey(refName)
 			if err != nil {
 				return nil, fmt.Errorf("package %q has invalid essential slice reference: %q", pkgName, refName)
@@ -346,10 +457,17 @@ func parsePackage(baseDir, pkgName, pkgPath string, data []byte) (*Package, erro
 			if sliceKey.Package == slice.Package && sliceKey.Slice == slice.Name {
 				return nil, fmt.Errorf("cannot add slice to itself as essential %q in %s", refName, pkgPath)
 			}
-			if slices.Contains(slice.Essential, sliceKey) {
-				return nil, fmt.Errorf("slice %s defined with redundant essential slice: %s", slice, refName)
+			if _, ok := slice.Essential[sliceKey]; ok {
+				return nil, fmt.Errorf("slice %s repeats %s in essential fields", slice, refName)
 			}
-			slice.Essential = append(slice.Essential, sliceKey)
+			if slice.Essential == nil {
+				slice.Essential = map[SliceKey]EssentialInfo{}
+			}
+			var archList []string
+			if essentialInfo != nil {
+				archList = essentialInfo.Arch.List
+			}
+			slice.Essential[sliceKey] = EssentialInfo{Arch: archList}
 		}
 
 		if len(yamlSlice.Contents) > 0 {
@@ -513,12 +631,12 @@ func pathInfoToYAML(pi *PathInfo) (*yamlPath, error) {
 // sliceToYAML converts a Slice object to a yamlSlice object.
 func sliceToYAML(s *Slice) (*yamlSlice, error) {
 	slice := &yamlSlice{
-		Essential: make([]string, 0, len(s.Essential)),
-		Contents:  make(map[string]*yamlPath, len(s.Contents)),
-		Mutate:    s.Scripts.Mutate,
+		Contents:    make(map[string]*yamlPath, len(s.Contents)),
+		Mutate:      s.Scripts.Mutate,
+		V3Essential: make(map[string]*yamlEssential, len(s.Essential)),
 	}
-	for _, key := range s.Essential {
-		slice.Essential = append(slice.Essential, key.String())
+	for key, info := range s.Essential {
+		slice.V3Essential[key.String()] = &yamlEssential{Arch: yamlArch{info.Arch}}
 	}
 	for path, info := range s.Contents {
 		yamlPath, err := pathInfoToYAML(&info)
@@ -545,4 +663,92 @@ func packageToYAML(p *Package) (*yamlPackage, error) {
 		pkg.Slices[name] = *yamlSlice
 	}
 	return pkg, nil
+}
+
+type yamlMaintenance struct {
+	Standard  string `yaml:"standard"`
+	Expanded  string `yaml:"expanded"`
+	Legacy    string `yaml:"legacy"`
+	EndOfLife string `yaml:"end-of-life"`
+}
+
+func parseYamlMaintenance(yamlVar *yamlMaintenance) (Maintenance, error) {
+	maintenance := Maintenance{}
+
+	if yamlVar.Standard == "" {
+		return Maintenance{}, errors.New(`"standard" is unset`)
+	}
+	date, err := time.Parse(time.DateOnly, yamlVar.Standard)
+	if err != nil {
+		return Maintenance{}, errors.New(`expected format for "standard" is YYYY-MM-DD`)
+	}
+	maintenance.Standard = date
+
+	if yamlVar.EndOfLife == "" {
+		return Maintenance{}, errors.New(`"end-of-life" is unset`)
+	}
+	date, err = time.Parse(time.DateOnly, yamlVar.EndOfLife)
+	if err != nil {
+		return Maintenance{}, errors.New(`expected format for "end-of-life" is YYYY-MM-DD`)
+	}
+	maintenance.EndOfLife = date
+
+	if yamlVar.Expanded != "" {
+		date, err = time.Parse(time.DateOnly, yamlVar.Expanded)
+		if err != nil {
+			return Maintenance{}, errors.New(`expected format for "expanded" is YYYY-MM-DD`)
+		}
+		maintenance.Expanded = date
+	}
+
+	if yamlVar.Legacy != "" {
+		date, err = time.Parse(time.DateOnly, yamlVar.Legacy)
+		if err != nil {
+			return Maintenance{}, errors.New(`expected format for "legacy" is YYYY-MM-DD`)
+		}
+		maintenance.Legacy = date
+	}
+
+	return maintenance, nil
+}
+
+var defaultMaintenance = map[string]Maintenance{
+	"20.04": {
+		Standard:  time.Date(2020, time.April, 23, 0, 0, 0, 0, time.UTC),
+		Expanded:  time.Date(2025, time.May, 29, 0, 0, 0, 0, time.UTC),
+		Legacy:    time.Date(2030, time.April, 23, 0, 0, 0, 0, time.UTC),
+		EndOfLife: time.Date(2032, time.April, 27, 0, 0, 0, 0, time.UTC),
+	},
+	"22.04": {
+		Standard:  time.Date(2022, time.April, 21, 0, 0, 0, 0, time.UTC),
+		Expanded:  time.Date(2027, time.June, 1, 0, 0, 0, 0, time.UTC),
+		Legacy:    time.Date(2032, time.April, 21, 0, 0, 0, 0, time.UTC),
+		EndOfLife: time.Date(2034, time.April, 25, 0, 0, 0, 0, time.UTC),
+	},
+	"22.10": {
+		Standard:  time.Date(2022, time.October, 20, 0, 0, 0, 0, time.UTC),
+		EndOfLife: time.Date(2023, time.July, 20, 0, 0, 0, 0, time.UTC),
+	},
+	"23.04": {
+		Standard:  time.Date(2023, time.April, 20, 0, 0, 0, 0, time.UTC),
+		EndOfLife: time.Date(2024, time.January, 25, 0, 0, 0, 0, time.UTC),
+	},
+	"23.10": {
+		Standard:  time.Date(2023, time.October, 12, 0, 0, 0, 0, time.UTC),
+		EndOfLife: time.Date(2024, time.July, 11, 0, 0, 0, 0, time.UTC),
+	},
+	"24.04": {
+		Standard:  time.Date(2024, time.April, 25, 0, 0, 0, 0, time.UTC),
+		Expanded:  time.Date(2029, time.May, 31, 0, 0, 0, 0, time.UTC),
+		Legacy:    time.Date(2034, time.April, 25, 0, 0, 0, 0, time.UTC),
+		EndOfLife: time.Date(2036, time.April, 29, 0, 0, 0, 0, time.UTC),
+	},
+	"24.10": {
+		Standard:  time.Date(2024, time.October, 10, 0, 0, 0, 0, time.UTC),
+		EndOfLife: time.Date(2025, time.July, 10, 0, 0, 0, 0, time.UTC),
+	},
+	"25.04": {
+		Standard:  time.Date(2025, time.April, 17, 0, 0, 0, 0, time.UTC),
+		EndOfLife: time.Date(2026, time.January, 15, 0, 0, 0, 0, time.UTC),
+	},
 }
