@@ -19,6 +19,8 @@ import (
 	//"github.com/canonical/chisel/internal/logger"
 )
 
+// TEST
+
 var (
 	// Standard streams, redirected for testing.
 	Stdin  io.Reader = os.Stdin
