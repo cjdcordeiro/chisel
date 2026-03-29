@@ -1,5 +1,5 @@
 package cache_test
-
+// foo
 import (
 	. "gopkg.in/check.v1"
 
