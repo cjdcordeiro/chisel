@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"golang.org/x/crypto/sha3"
 )
 
 func DefaultDir(suffix string) string {
@@ -89,27 +91,44 @@ func (cw *Writer) Digest() string {
 	return cw.digest
 }
 
-const digestKind = "sha256"
+type DigestKind string
+
+const (
+	SHA256 DigestKind = "sha256"
+	SHA384 DigestKind = "sha384"
+)
+
+var digestKinds = []DigestKind{SHA256, SHA384}
 
 var ErrMiss = fmt.Errorf("not cached")
 
-func (c *Cache) filePath(digest string) string {
-	return filepath.Join(c.Dir, digestKind, digest)
+func (c *Cache) filePath(digestKind DigestKind, digest string) string {
+	return filepath.Join(c.Dir, string(digestKind), digest)
 }
 
-func (c *Cache) Create(digest string) *Writer {
+func (c *Cache) Create(digestKind DigestKind, digest string) *Writer {
 	if c.Dir == "" {
 		return &Writer{err: fmt.Errorf("internal error: cache directory is unset")}
 	}
-	err := os.MkdirAll(filepath.Join(c.Dir, digestKind), 0755)
+
+	var h hash.Hash
+	switch digestKind {
+	case SHA256:
+		h = sha256.New()
+	case SHA384:
+		h = sha3.New384()
+	default:
+		return &Writer{err: fmt.Errorf("internal error: unsupported digest kind: %q", digestKind)}
+	}
+	err := os.MkdirAll(filepath.Join(c.Dir, string(digestKind)), 0755)
 	if err != nil {
 		return &Writer{err: fmt.Errorf("cannot create cache directory: %v", err)}
 	}
 	var file *os.File
 	if digest == "" {
-		file, err = os.CreateTemp(c.filePath(""), "tmp.*")
+		file, err = os.CreateTemp(c.filePath(digestKind, ""), "tmp.*")
 	} else {
-		file, err = os.Create(c.filePath(digest + ".tmp"))
+		file, err = os.Create(c.filePath(digestKind, digest+".tmp"))
 	}
 	if err != nil {
 		return &Writer{err: fmt.Errorf("cannot create cache file: %v", err)}
@@ -117,13 +136,13 @@ func (c *Cache) Create(digest string) *Writer {
 	return &Writer{
 		dir:    c.Dir,
 		digest: digest,
-		hash:   sha256.New(),
+		hash:   h,
 		file:   file,
 	}
 }
 
-func (c *Cache) Write(digest string, data []byte) error {
-	f := c.Create(digest)
+func (c *Cache) Write(digestKind DigestKind, digest string, data []byte) error {
+	f := c.Create(digestKind, digest)
 	_, err1 := f.Write(data)
 	err2 := f.Close()
 	if err1 != nil {
@@ -132,11 +151,11 @@ func (c *Cache) Write(digest string, data []byte) error {
 	return err2
 }
 
-func (c *Cache) Open(digest string) (io.ReadSeekCloser, error) {
+func (c *Cache) Open(digestKind DigestKind, digest string) (io.ReadSeekCloser, error) {
 	if c.Dir == "" || digest == "" {
 		return nil, ErrMiss
 	}
-	filePath := c.filePath(digest)
+	filePath := c.filePath(digestKind, digest)
 	file, err := os.Open(filePath)
 	if os.IsNotExist(err) {
 		return nil, ErrMiss
@@ -151,8 +170,8 @@ func (c *Cache) Open(digest string) (io.ReadSeekCloser, error) {
 	return file, nil
 }
 
-func (c *Cache) Read(digest string) ([]byte, error) {
-	file, err := c.Open(digest)
+func (c *Cache) Read(digestKind DigestKind, digest string) ([]byte, error) {
+	file, err := c.Open(digestKind, digest)
 	if err != nil {
 		return nil, err
 	}
@@ -165,22 +184,28 @@ func (c *Cache) Read(digest string) ([]byte, error) {
 }
 
 func (c *Cache) Expire(timeout time.Duration) error {
-	entries, err := os.ReadDir(filepath.Join(c.Dir, digestKind))
-	if err != nil {
-		return fmt.Errorf("cannot list cache directory: %v", err)
-	}
 	expired := time.Now().Add(-timeout)
-	for _, entry := range entries {
-		finfo, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if finfo.ModTime().After(expired) {
+	for _, digestKind := range digestKinds {
+		digestKindDir := filepath.Join(c.Dir, string(digestKind))
+		entries, err := os.ReadDir(digestKindDir)
+		if os.IsNotExist(err) {
 			continue
 		}
-		err = os.Remove(filepath.Join(c.Dir, digestKind, finfo.Name()))
 		if err != nil {
-			return fmt.Errorf("cannot expire cache entry: %v", err)
+			return fmt.Errorf("cannot list cache directory: %v", err)
+		}
+		for _, entry := range entries {
+			finfo, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			if finfo.ModTime().After(expired) {
+				continue
+			}
+			err = os.Remove(filepath.Join(digestKindDir, finfo.Name()))
+			if err != nil {
+				return fmt.Errorf("cannot expire cache entry: %v", err)
+			}
 		}
 	}
 	return nil
