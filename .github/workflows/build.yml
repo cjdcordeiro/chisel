@@ -130,6 +130,6 @@ jobs:
           for dir in chisel_*/; do
             for file in "$dir"*; do
               echo "Uploading $file to release $CHISEL_VERSION"
-              gh release upload "$CHISEL_VERSION" "$file"
+              gh release upload "$CHISEL_VERSION" "$file" --repo "$GITHUB_REPOSITORY"
             done
           done
