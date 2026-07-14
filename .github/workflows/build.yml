@@ -116,14 +116,13 @@ jobs:
     if: ${{ github.event_name == 'release' }}
     needs: build-chisel
     runs-on: ubuntu-24.04
-    # This job only runs on release events, and the only thing it does
-    # is upload the artifacts to the release. It does not build anything.
+    # This job only runs on release events (which can only be triggered by users
+    # with "write" access) and the only thing it does is to upload the artifacts
+    # to the release. It does not build anything.
 
-    # The previous approach used a custom fine grained personal token, from a bot account.
-    # This new approach goes one step further by splitting the privileged step from
-    # the previous job, and thus allowing us to use the GITHUB_TOKEN safely,
-    # while also removing the need to have the previous bot account as a collaborator
-    # on the repository (which on its own introduced an unnecessary security risk). 
+    # This job splits the privileged step below from the above job, allowing us to
+    # use the GITHUB_TOKEN safely, while also removing the need to have a bot account
+    # as a repo collaborator. 
 
     permissions:
       contents: write # required for uploading artifacts to a release.
